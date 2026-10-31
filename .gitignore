@@ -1,0 +1,38 @@
+# dependencies
+node_modules/
+apps/api/vendor/
+
+# build output
+apps/web/dist/
+apps/web/dist-ssr/
+apps/api/public/build/
+apps/api/storage/*.key
+
+# local environment and secrets
+.env
+.env.*
+!.env.example
+apps/api/.env
+apps/api/.env.*
+!apps/api/.env.example
+
+# local database cluster + logs (created by scripts/pg.mjs)
+.pgdata/
+*.log
+
+# local PHP ini shim (enables pdo_pgsql on WAMP-style setups)
+.php-ini/
+
+# runtime caches
+apps/api/bootstrap/cache/*.php
+apps/api/storage/framework/cache/*
+apps/api/storage/framework/sessions/*
+apps/api/storage/framework/views/*
+apps/api/storage/logs/*
+!apps/api/storage/**/.gitignore
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
