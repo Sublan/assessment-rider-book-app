@@ -57,15 +57,31 @@ export class ApiError extends Error {
 // ---------------------------------------------------------------------------
 
 const TOKEN_KEY = 'ridebook_token';
+const USER_KEY = 'ridebook_user';
 
-/** Persist a Sanctum token after login. */
+/** Persist a Sanctum token and user profile after login. */
 export function saveToken(token: string): void {
   localStorage.setItem(TOKEN_KEY, token);
 }
 
-/** Remove the stored token on logout. */
+export function saveUser(user: import('./types').AuthUser): void {
+  localStorage.setItem(USER_KEY, JSON.stringify(user));
+  saveToken(user.token);
+}
+
+/** Remove the stored token and user profile on logout. */
 export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+}
+
+export function getStoredUser(): import('./types').AuthUser | null {
+  try {
+    const raw = localStorage.getItem(USER_KEY);
+    return raw ? (JSON.parse(raw) as import('./types').AuthUser) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Retrieve the stored token (null if not logged in). */
@@ -119,6 +135,10 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const payload = await response.json().catch(() => null);
 
   if (!response.ok) {
+    if (response.status === 401) {
+      clearToken();
+    }
+
     const error = (payload as { error?: { code?: string; message?: string; details?: Record<string, string[]>; requestId?: string } } | null)?.error;
 
     throw new ApiError(

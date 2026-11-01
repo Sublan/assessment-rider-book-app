@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ApiError, clearToken, rideApi, saveToken } from './api/client';
+import { ApiError, clearToken, getStoredUser, getToken, rideApi, saveUser } from './api/client';
 import type { AuthUser, DirectoryDriver, LahoreLocation, Ride, RideCategory, RiderSummary } from './api/types';
 import { BookingForm } from './components/BookingForm';
 import { DriverDashboard } from './components/DriverDashboard';
-import { DriverSimulator } from './components/DriverSimulator';
 import { LoginModal } from './components/LoginModal';
 import { MapPlaceholder } from './components/MapPlaceholder';
 import { RideStatusView } from './components/RideStatusView';
@@ -25,8 +24,8 @@ export default function App() {
   const [riders, setRiders] = useState<RiderSummary[]>([]);
   const [drivers, setDrivers] = useState<DirectoryDriver[]>([]);
 
-  // Auth state — currentUser is set after login; token stored in localStorage via saveToken()
-  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  // Auth state — currentUser is initialized from localStorage if available
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => getStoredUser());
   const [dismissedLogin, setDismissedLogin] = useState(false);
   const [showLoginModal, setShowLoginModal] = useState(false);
 
@@ -37,7 +36,6 @@ export default function App() {
   const [activeRide, setActiveRide] = useState<Ride | null>(null);
   const [submitState, setSubmitState] = useState<ActionState>(IDLE_ACTION);
   const [cancelState, setCancelState] = useState<ActionState>(IDLE_ACTION);
-  const [driverActionState, setDriverActionState] = useState<ActionState>(IDLE_ACTION);
 
   const idempotencyKey = useRef<string | null>(null);
 
@@ -58,8 +56,14 @@ export default function App() {
       .then(([directory, riderList]) => {
         setLocations(directory.locations);
         setRiders(riderList);
+        
         const defaultRider = riderList[0];
-        if (defaultRider) {
+        const stored = getStoredUser();
+
+        // If a valid stored user exists, don't overwrite with mock demo-token
+        if (stored && getToken()) {
+          setCurrentUser(stored);
+        } else if (defaultRider) {
           setCurrentUser((current) => current ?? {
             token: 'demo-token',
             userType: 'rider',
@@ -74,6 +78,16 @@ export default function App() {
         );
         setBootError(null);
         setBootState('ready');
+
+        // If the logged in user is a rider and has a valid token, sync active ride
+        if (getToken() && (stored?.userType === 'rider' || (!stored && defaultRider))) {
+          rideApi
+            .riderActiveRide(controller.signal)
+            .then((res) => {
+              if (res?.activeRide) setActiveRide(res.activeRide);
+            })
+            .catch(() => undefined);
+        }
       })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return;
@@ -95,7 +109,7 @@ export default function App() {
     async (phone: string) => {
       try {
         const user = await rideApi.riderLogin(phone);
-        saveToken(user.token);
+        saveUser(user);
         setCurrentUser(user);
         setShowLoginModal(false);
         setDismissedLogin(false);
@@ -111,7 +125,7 @@ export default function App() {
   const handleLoginAsDriver = useCallback(async (phone: string) => {
     try {
       const user = await rideApi.driverLogin(phone);
-      saveToken(user.token);
+      saveUser(user);
       setCurrentUser(user);
       setShowLoginModal(false);
       setDismissedLogin(false);
@@ -128,7 +142,6 @@ export default function App() {
     setActiveRide(null);
     setCancelState(IDLE_ACTION);
     setSubmitState(IDLE_ACTION);
-    setDriverActionState(IDLE_ACTION);
   }, []);
 
   const pickup = useMemo(
@@ -201,49 +214,9 @@ export default function App() {
     [ride, setRide, refreshDrivers],
   );
 
-  // DriverSimulator uses the currently-stored Bearer token automatically
-  const acceptAsDriver = useCallback(
-    async (_driverId: string) => {
-      if (!ride) return;
-
-      setDriverActionState({ busy: true, error: null });
-      try {
-        // The DriverSimulator is a demo panel on the rider view. It calls accept
-        // using the driverId from the directory list — but since Sanctum auth is
-        // now token-based, this panel is only for demo/QA. The real driver uses
-        // DriverDashboard. We call the API without any rider/driver override here;
-        // the demo panel doesn't hold a driver token, so it will get a 401 unless
-        // a driver is logged in. For demo purposes we still allow the call to go
-        // through (the API requires a driver token on /accept).
-        setRide(await rideApi.acceptRide(ride.id));
-        setDriverActionState(IDLE_ACTION);
-        refreshDrivers();
-      } catch (error) {
-        setDriverActionState({ busy: false, error: error as ApiError });
-        refreshDrivers();
-        void refresh();
-      }
-    },
-    [ride, setRide, refreshDrivers, refresh],
-  );
-
-  const completeAsDriver = useCallback(async () => {
-    if (!ride) return;
-
-    setDriverActionState({ busy: true, error: null });
-    try {
-      setRide(await rideApi.completeRide(ride.id));
-      setDriverActionState(IDLE_ACTION);
-      refreshDrivers();
-    } catch (error) {
-      setDriverActionState({ busy: false, error: error as ApiError });
-    }
-  }, [ride, setRide, refreshDrivers]);
-
   const bookAnother = useCallback(() => {
     setActiveRide(null);
     setCancelState(IDLE_ACTION);
-    setDriverActionState(IDLE_ACTION);
     setSubmitState(IDLE_ACTION);
   }, []);
 
@@ -325,8 +298,27 @@ export default function App() {
             <ErrorBanner
               error={bootError}
               title="RideBook is not reachable"
-              onRetry={() => setBootToken((token) => token + 1)}
+              onRetry={() => {
+                clearToken();
+                setCurrentUser(null);
+                setBootToken((token) => token + 1);
+              }}
             />
+            <div style={{ marginTop: '1rem', textAlign: 'center' }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  clearToken();
+                  setCurrentUser(null);
+                  setBootError(null);
+                  setShowLoginModal(true);
+                  setBootToken((token) => token + 1);
+                }}
+              >
+                Sign In
+              </button>
+            </div>
           </div>
         </main>
       ) : null}
@@ -368,26 +360,15 @@ export default function App() {
               ride={ride}
             />
 
-            {ride ? (
-              <DriverSimulator
-                drivers={drivers}
-                ride={ride}
-                busy={driverActionState.busy}
-                error={driverActionState.error}
-                onAccept={(driverId) => void acceptAsDriver(driverId)}
-                onComplete={() => void completeAsDriver()}
-              />
-            ) : (
-              <section className="info">
-                <h3>Lahore Ride-Booking</h3>
-                <ul>
-                  <li>Rider logs in, selects pickup &amp; destination, and chooses category.</li>
-                  <li>Real-time fare calculation and ETA from Laravel MySQL backend.</li>
-                  <li>Click 'Switch Account / Portal' at top right to view Driver Portal!</li>
-                  <li>Drivers see incoming requests live and can accept &amp; complete rides.</li>
-                </ul>
-              </section>
-            )}
+            <section className="info">
+              <h3>Lahore Ride-Booking</h3>
+              <ul>
+                <li>Rider selects pickup &amp; destination and chooses category.</li>
+                <li>Real-time fare calculation and ETA from Laravel MySQL backend.</li>
+                <li>Live WebSocket dispatch pushes ride updates instantly across devices.</li>
+                <li>Click &lsquo;Switch Account / Portal&rsquo; to open the Driver Dashboard.</li>
+              </ul>
+            </section>
           </aside>
         </main>
       ) : null}

@@ -36,7 +36,7 @@ final class ResolveActor
         $bearerToken = $request->bearerToken();
 
         if ($bearerToken !== null && $bearerToken !== '') {
-            $this->resolveFromToken($bearerToken);
+            $this->resolveFromToken($request, $bearerToken);
         }
 
         // Keep backwards compatibility for test cases or services passing explicit headers
@@ -59,12 +59,16 @@ final class ResolveActor
         return $next($request);
     }
 
-    private function resolveFromToken(string $rawToken): void
+    private function resolveFromToken(Request $request, string $rawToken): void
     {
         // Sanctum plain text tokens are formatted as "{id}|{hash}"
         $pat = PersonalAccessToken::findToken($rawToken);
 
         if ($pat === null) {
+            // If the route is a public directory/locations route, ignore stale token rather than hard failing
+            if ($request->is('api/riders', 'api/drivers', 'api/locations', 'api/health', 'api/rides/estimate')) {
+                return;
+            }
             throw ApiException::unauthorized('Invalid or expired token. Please log in again.');
         }
 
