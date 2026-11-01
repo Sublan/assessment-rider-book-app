@@ -36,7 +36,7 @@ production plan.
   └───────────────────────────────────────────┼──────────────────────────────┘
                                               ▼
   ┌──────────────────────────────────────────────────────────────────────────┐
-  │ MySQL 8+ (WAMP) / PostgreSQL                                             │
+  │ MySQL 8+ (WAMP or Docker)                                                │
   │  riders · drivers · rides · driver_assignments · ride_events ·           │
   │  idempotency_keys                                                        │
   │                                                                          │
@@ -47,7 +47,7 @@ production plan.
 
 ## 1. Why this stack and this shape
 
-**Laravel 12 + MySQL 8+ (WAMP) / PostgreSQL + React/TypeScript.**
+**Laravel 12 + MySQL 8 + React/TypeScript.**
 
 Laravel because the problem is a transactional CRUD domain with strict state
 transitions: its form requests, service container, migration tooling and testing
@@ -56,24 +56,25 @@ that the locking logic reads like the specification. The brief cares about
 correctness, not novelty, and this stack lets a reviewer follow one ride from
 route to row in four files.
 
-MySQL / PostgreSQL because the two hardest requirements — *no two drivers on one ride*
-and *no duplicate ride per rider* — are invariants, and the strongest place to
-express an invariant is the database. We use functional unique indexes in MySQL 8+
-and partial unique indexes in PostgreSQL (`rides_one_active_per_driver_idx`) to make double booking physically impossible,
-not merely unlikely:
+MySQL because the two hardest requirements — *no two drivers on one ride* and
+*no duplicate ride per rider* — are invariants, and the strongest place to
+express an invariant is the database. MySQL 8.0.13+ supports functional indexes,
+so we express both invariants as a unique index over an expression that is `null`
+for every row that should not participate, making double booking physically
+impossible rather than merely unlikely:
 
 ```sql
--- MySQL 8+ Functional Unique Index:
+-- MySQL 8+ Functional Unique Index (what the migration runs):
 create unique index rides_one_active_per_driver_idx
     on rides ((case when status = 'accepted' then driver_id else null end));
 
--- PostgreSQL Partial Unique Index:
-create unique index rides_one_active_per_driver_idx
-    on rides (driver_id) where status = 'accepted';
+create unique index rides_one_active_per_rider_idx
+    on rides ((case when status in ('requested', 'accepted') then rider_id else null end));
 ```
 
-SQLite was rejected outright: no partial unique indexes with the same semantics,
-no JSONB, no `CHECK … ~ regex`.
+MySQL allows any number of `null`s in a unique index, which is exactly the
+"partial" behaviour we need. SQLite was rejected outright: it cannot express a
+functional unique index, so the guarantee would degrade to application code.
 
 React + Vite because the UI is a two-step flow with a polling status view; a
 small SPA with one stylesheet and zero UI dependencies keeps the diff readable
@@ -124,9 +125,10 @@ If a future refactor drops the lock, this still refuses to overwrite state it
 did not read.
 
 **(c) The database refuses the result.** `rides_one_active_per_driver_idx` is a
-partial unique index: a driver cannot appear on two `accepted` rides. If any code
-path — a console command, a backfill, a migration — ever tried, it gets SQLSTATE
-`23505`. `RideService::translateUniqueViolation()` converts that into the same
+functional unique index: a driver cannot appear on two `accepted` rides. If any
+code path — a console command, a backfill, a migration — ever tried, MySQL
+rejects it with duplicate-key error `1062` (SQLSTATE `23000`).
+`RideService::translateUniqueViolation()` converts that into the same
 `409 DRIVER_BUSY` the happy path returns, so the client sees one contract
 regardless of which layer caught it.
 
@@ -137,8 +139,8 @@ regardless of which layer caught it.
   `available`;
 - a direct `UPDATE` that bypasses the service is rejected by the index;
 - a **second database session** writing to a ride row locked by the first blocks
-  and trips `lock_timeout` (`55P03`) — i.e. writers really do serialise on the
-  row rather than both succeeding.
+  and trips the InnoDB lock-wait timeout (error `1205`) — i.e. writers really do
+  serialise on the row rather than both succeeding.
 
 ## 3. Retries and duplicate requests
 
@@ -148,20 +150,20 @@ Two different problems, two different mechanisms.
 `IdempotencyService::claim()` runs *inside the same transaction as the insert*:
 
 ```sql
-insert into idempotency_keys (key, scope, request_hash, created_at)
+insert ignore into idempotency_keys (key, scope, request_hash, created_at)
 values (?, ?, ?, now())
-on conflict (key, scope) do nothing
-returning key
+-- 1 affected row = the key is ours for this attempt, 0 = it already existed
 ```
 
 - The claim commits or rolls back **with** the ride. A request that fails
   validation leaves no key behind, so a key is never poisoned by an attempt that
   never happened (asserted in `IdempotencyTest`).
-- `on conflict do nothing` rather than a plain insert matters: a plain insert
-  raises `23505`, and PostgreSQL aborts the *whole* transaction on a failed
-  statement. With `on conflict`, a concurrent duplicate simply waits for the
-  other transaction and then returns zero rows, at which point we read the
-  committed attempt and replay its stored response.
+- `insert ignore` rather than a plain insert matters: a plain insert raises
+  duplicate-key error `1062`, and the caller would have to unwind the whole
+  transaction just to read the row that blocked it. With `insert ignore`, a
+  concurrent duplicate waits for the winning transaction to finish, then reports
+  0 affected rows, at which point we read the committed attempt and replay its
+  stored response.
 - The stored `response_body` is replayed verbatim, so a retry sees the ride *as
   it was created* (status `requested`), not its current state. The live resource
   is still available at `GET /rides/{id}`.
@@ -235,7 +237,8 @@ current one.
 
 - `POST /rides` does one fare computation (in-memory), one indexed candidate
   query and one short transaction. That is ~3 queries; the pool is the limit, so
-  raise `DB_POOL`/pgbouncer before anything else.
+  raise the connection pool (MySQL `max_connections`, or ProxySQL in front) before
+  anything else.
 - The candidate query is `where status='available' and is_active and city = ?`
   using `drivers_available_idx`. At city scale that is thousands of rows — fine.
   At 100k drivers it is not, which is where geospatial prefiltering comes in
@@ -251,10 +254,10 @@ allowance, and how to un-simplify it):
 2. On request, `GEOSEARCH … BYRADIUS 3km` returns the nearest N driver ids in
    ~O(log N) — no table scan, no PostGIS needed for the hot path.
 3. Filter by eligibility (online, active, category) using a small Redis hash
-   per driver, then confirm against Postgres before assigning.
+   per driver, then confirm against MySQL before assigning.
 4. If the first radius yields nobody, expand to 5km, 8km, and so on — with a cap
    so nobody gets matched to a driver 30 minutes away.
-5. Postgres remains the source of truth for *state* (who is on a trip); Redis is
+5. MySQL remains the source of truth for *state* (who is on a trip); Redis is
    a cache of *position*, and is allowed to be lossy.
 
 That keeps the assignment rule in one place — the row lock and the unique index —
@@ -267,7 +270,7 @@ Not before there is a measured reason. The order I would reach for them:
 | Trigger | Add | Why not before |
 | --- | --- | --- |
 | p95 on `GET /rides/{id}` degrades because of polling volume | WebSocket/SSE fan-out with Redis pub/sub | Polling is one indexed read and survives restarts; it is the cheapest correct thing until it is measurably expensive |
-| Driver positions updating every few seconds | Redis GEO + a heartbeat endpoint | Postgres would take an `UPDATE` per driver per 4s; pointless while the fleet is small |
+| Driver positions updating every few seconds | Redis GEO + a heartbeat endpoint | MySQL would take an `UPDATE` per driver per 4s; pointless while the fleet is small |
 | Dispatch fan-out (offer → timeout → next driver) or notifications | Message broker (SQS/RabbitMQ) with a worker pool | The current flow is synchronous and deterministic: a driver accepts, or the ride waits. A queue is correct once offers expire and must be retried on a schedule |
 | Rate limiting across many API instances | Redis-backed limiter | Laravel's limiter is per-process with `CACHE_STORE=file`; today that is a coarse safety net, not a global quota |
 | Team/ownership boundaries, or one endpoint with a wildly different scaling profile | Split out a service (e.g. pricing, dispatch) | A monolith with clear service classes is easier to keep correct; splitting early buys distributed transactions and loses the single-transaction guarantee that makes §2 simple |
@@ -294,8 +297,9 @@ images on any container host (ECS/Fargate, Cloud Run, Kubernetes):
 
 - RED metrics per route (rate, errors, duration) — the p95 of `POST /rides` is
   the number that tells you the matcher or the lock is the bottleneck;
-- `SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock'` and a
-  lock-wait alert: a spike here means contention on `rides`;
+- `SELECT count(*) FROM performance_schema.data_lock_waits` (or
+  `SHOW ENGINE INNODB STATUS` → `TRANSACTIONS` → lock waits) and a lock-wait
+  alert: a spike here means contention on `rides`;
 - business counters: rides requested / accepted / cancelled / completed, and
   **accept-failure ratio** (409s per 100 accepts) — a jump means riders and
   drivers are racing badly;

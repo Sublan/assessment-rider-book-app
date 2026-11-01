@@ -15,6 +15,31 @@ A production-grade, simplified ride-booking platform for Lahore, Pakistan:
 | **API documentation or example requests** | ✅ Done | OpenAPI 3.1 specification at [`docs/openapi.yaml`](docs/openapi.yaml) + cURL examples below |
 | **Architecture diagram and design notes** | ✅ Done | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) answering all 8 technical questions |
 | **Known limitations and proposed improvements** | ✅ Done | Section in `docs/ARCHITECTURE.md` (§8) and detailed below |
+| **AI tool disclosure** | ✅ Done | Section below |
+
+---
+
+## AI Tool Disclosure
+
+AI coding tools were used on this submission, as required by §6 of the brief:
+
+| Tool | Role |
+| :--- | :--- |
+| **Claude Code** | Implementation: writing and editing the API, the SPA, the migrations, the tests and the documentation. |
+| **Claude audit skills** | Verification and review: auditing the finished code against the brief, re-reading every edited file, and running the checks below. |
+
+**How the output was verified.** Nothing was accepted on the tool's word alone. Every file
+was read back after editing, and the README's claims are limited to commands that can be
+re-run from a clean clone:
+
+- `npm run test:api` — 80 PHPUnit tests / 257 assertions against a real MySQL database;
+- `npm run test:web` — 8 Vitest tests over the rider and bootstrap flows;
+- `npm run typecheck:web` — `tsc --noEmit`;
+- manual end-to-end runs of the rider flow (estimate → request → accept → complete/cancel)
+  against the running API and a browser, including the failure paths.
+
+Claims that could not be verified this way are labelled as production plans or known
+limitations rather than as done.
 
 ---
 

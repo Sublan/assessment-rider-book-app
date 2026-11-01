@@ -5,12 +5,17 @@ info:
   description: |
     Simplified ride-booking API for Lahore, Pakistan.
 
-    **Identity.** This demo has no login. Callers are identified by request
-    headers: `X-Rider-Id` for rider actions and `X-Driver-Id` for driver
-    actions. A production build would verify a session or JWT in the same
-    middleware (`App\Http\Middleware\ResolveActor`) and keep the rest of this
-    contract unchanged. Every ride mutation additionally checks that the caller
-    is the owner of the ride.
+    **Identity.** Authentication is Laravel Sanctum. `POST /auth/rider/login` or
+    `POST /auth/driver/login` exchanges a phone number for a personal access
+    token carrying a `role:rider` or `role:driver` ability. Send it on every
+    protected call as `Authorization: Bearer <token>`; the token's owner becomes
+    the actor (`App\Http\Middleware\ResolveActor`). Rider tokens cannot act as a
+    driver and vice versa. Every ride mutation additionally checks that the
+    caller owns the ride.
+
+    Public endpoints — `/health`, `/locations`, `/riders`, `/drivers`,
+    `/rides/estimate`, `/rides/{ride}` and the two login endpoints — are marked
+    `security: []` below and work without a token.
 
     **Errors.** Every failure uses one envelope:
     `{ "error": { "code", "message", "details?", "requestId" } }`. Branch on
@@ -31,6 +36,8 @@ info:
 servers:
   - url: http://127.0.0.1:8000/api
     description: Local development
+security:
+  - bearerAuth: []
 tags:
   - name: Auth
   - name: Rides
@@ -42,53 +49,145 @@ paths:
   /auth/rider/login:
     post:
       tags: [Auth]
-      summary: End-user login as rider
+      summary: Sign in as a rider
+      description: |
+        Looks the rider up by phone and issues a Sanctum personal access token
+        with the `role:rider` ability. A new token is minted per session, so
+        signing in on a second device does not end the first session.
+      security: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
+              required: [phone]
               properties:
-                riderId:
+                phone:
                   type: string
-                  description: Rider UUID or phone number
+                  pattern: '^\+?[0-9]{10,15}$'
+                  example: '+923001234501'
       responses:
         '200':
-          description: Rider authenticated profile
+          description: Token, profile, and the caller's live ride if there is one
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      token: { type: string, description: Sanctum bearer token }
+                      userType: { type: string, enum: [rider] }
+                      id: { type: string, format: uuid }
+                      fullName: { type: string }
+                      phone: { type: string }
+                      activeRide:
+                        oneOf:
+                          - $ref: '#/components/schemas/Ride'
+                          - type: 'null'
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /auth/driver/login:
     post:
       tags: [Auth]
-      summary: Driver login
+      summary: Sign in as a driver
+      description: |
+        Same exchange as the rider login, but issues a token with the
+        `role:driver` ability and returns the driver's vehicle and availability.
+      security: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
+              required: [phone]
               properties:
-                driverId:
+                phone:
                   type: string
-                  description: Driver UUID or phone number
+                  pattern: '^\+?[0-9]{10,15}$'
+                  example: '+923211111101'
       responses:
         '200':
-          description: Driver authenticated profile
+          description: Token, profile, vehicle, and current availability
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      token: { type: string }
+                      userType: { type: string, enum: [driver] }
+                      id: { type: string, format: uuid }
+                      fullName: { type: string }
+                      phone: { type: string }
+                      vehicleCategory: { $ref: '#/components/schemas/RideCategory' }
+                      vehicleModel: { type: string }
+                      vehiclePlate: { type: string }
+                      rating: { type: number }
+                      status: { $ref: '#/components/schemas/DriverStatus' }
+                      currentLat: { type: number, nullable: true }
+                      currentLng: { type: number, nullable: true }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /driver/feed:
     get:
       tags: [Drivers]
-      summary: Real-time incoming rides and active trip feed for the driver
-      parameters:
-        - in: header
-          name: x-driver-id
-          required: true
-          schema:
-            type: string
-            format: uuid
+      summary: Active trip and incoming ride feed for the signed-in driver
+      description: |-
+        Requires a driver token. Returns the driver's own active ride (if any)
+        plus up to ten unassigned `requested` rides their vehicle can serve. A
+        driver who is `on_trip` or `offline` gets an empty incoming list.
       responses:
         '200':
-          description: Active trip and incoming requests
+          description: Driver, active ride, and incoming requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      driver: { $ref: '#/components/schemas/Driver' }
+                      activeRide:
+                        oneOf:
+                          - $ref: '#/components/schemas/Ride'
+                          - type: 'null'
+                      incomingRides:
+                        type: array
+                        items: { $ref: '#/components/schemas/Ride' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /rider/active-ride:
+    get:
+      tags: [Rides]
+      summary: The signed-in rider's current ride, if any
+      description: Used by the SPA on page load to restore an in-flight ride.
+      responses:
+        '200':
+          description: The active ride or null
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      activeRide:
+                        oneOf:
+                          - $ref: '#/components/schemas/Ride'
+                          - type: 'null'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /health:
     get:
@@ -115,6 +214,7 @@ paths:
       tags: [Directory]
       summary: Lahore service area and pickup points
       description: Static geocoder stand-in; the bounding box is also the server-side service-area check.
+      security: []
       responses:
         '200':
           description: Service area
@@ -149,7 +249,11 @@ paths:
     get:
       tags: [Directory]
       summary: Demo rider directory
-      description: Stands in for an authenticated profile endpoint so the SPA can offer an identity picker.
+      description: |
+        Demo support endpoint: lists the seeded riders so the login screen can
+        offer phone numbers to pick from. Unauthenticated, and would be removed
+        or scoped to admins in production.
+      security: []
       responses:
         '200':
           description: Riders
@@ -167,6 +271,8 @@ paths:
     get:
       tags: [Drivers]
       summary: Demo driver directory
+      description: Demo support endpoint for the login screen and driver picker. Unauthenticated.
+      security: []
       parameters:
         - name: status
           in: query
@@ -196,10 +302,6 @@ paths:
       parameters:
         - name: driver
           in: path
-          required: true
-          schema: { type: string, format: uuid }
-        - name: X-Driver-Id
-          in: header
           required: true
           schema: { type: string, format: uuid }
       requestBody:
@@ -235,7 +337,8 @@ paths:
       description: |
         Pure read: creates nothing. Returns the same fare the ride will be
         created with, plus how many drivers could take it and the nearest
-        pickup ETA.
+        pickup ETA. Unauthenticated.
+      security: []
       requestBody:
         required: true
         content:
@@ -270,10 +373,6 @@ paths:
         Send `Idempotency-Key` to make retries safe. The response header
         `Idempotent-Replayed: true` marks a replayed response.
       parameters:
-        - name: X-Rider-Id
-          in: header
-          required: true
-          schema: { type: string, format: uuid }
         - name: Idempotency-Key
           in: header
           required: false
@@ -316,6 +415,11 @@ paths:
     get:
       tags: [Rides]
       summary: Retrieve a ride and its timeline
+      description: |-
+        Unauthenticated so the status view can poll it. In production this
+        should be restricted to the ride's rider, its assigned driver, and
+        operations staff.
+      security: []
       parameters:
         - $ref: '#/components/parameters/RideId'
       responses:
@@ -341,10 +445,6 @@ paths:
         `409 DRIVER_NOT_ELIGIBLE`.
       parameters:
         - $ref: '#/components/parameters/RideId'
-        - name: X-Driver-Id
-          in: header
-          required: true
-          schema: { type: string, format: uuid }
       responses:
         '200':
           description: Ride with the assigned driver
@@ -368,14 +468,6 @@ paths:
         the driver back to `available` in the same transaction.
       parameters:
         - $ref: '#/components/parameters/RideId'
-        - name: X-Rider-Id
-          in: header
-          required: false
-          schema: { type: string, format: uuid }
-        - name: X-Driver-Id
-          in: header
-          required: false
-          schema: { type: string, format: uuid }
       requestBody:
         required: false
         content:
@@ -405,10 +497,6 @@ paths:
       description: Only the assigned driver may complete an `accepted` ride.
       parameters:
         - $ref: '#/components/parameters/RideId'
-        - name: X-Driver-Id
-          in: header
-          required: true
-          schema: { type: string, format: uuid }
       responses:
         '200':
           description: Completed ride
@@ -424,6 +512,16 @@ paths:
         '409': { $ref: '#/components/responses/Conflict' }
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Sanctum
+      description: |
+        Personal access token returned by `POST /auth/rider/login` or
+        `POST /auth/driver/login`. The token carries `role:rider` or
+        `role:driver`; a token cannot act as the other role.
+
   parameters:
     RideId:
       name: ride
@@ -433,7 +531,7 @@ components:
 
   responses:
     Unauthorized:
-      description: Missing or malformed caller identity
+      description: Missing, invalid or expired bearer token, or a token of the wrong role
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorEnvelope' }
