@@ -1,0 +1,648 @@
+openapi: 3.1.0
+info:
+  title: RideBook Lahore API
+  version: 1.0.0
+  description: |
+    Simplified ride-booking API for Lahore, Pakistan.
+
+    **Identity.** This demo has no login. Callers are identified by request
+    headers: `X-Rider-Id` for rider actions and `X-Driver-Id` for driver
+    actions. A production build would verify a session or JWT in the same
+    middleware (`App\Http\Middleware\ResolveActor`) and keep the rest of this
+    contract unchanged. Every ride mutation additionally checks that the caller
+    is the owner of the ride.
+
+    **Errors.** Every failure uses one envelope:
+    `{ "error": { "code", "message", "details?", "requestId" } }`. Branch on
+    `code` (stable), show `message` (human readable), quote `requestId` in bug
+    reports.
+
+    **Retries.** `POST /rides` accepts an optional `Idempotency-Key` header
+    (8-200 chars). The key is claimed in the same transaction as the insert, so
+    a retry replays the original response instead of creating a second ride, and
+    a failed attempt never poisons the key. Keys are namespaced per rider.
+
+    **Money.** All amounts are integer minor units (paisa, 1 PKR = 100 paisa).
+    A `totalPkr` convenience field is included for display only.
+
+    **Lifecycle.** `requested -> accepted -> completed`, with `cancelled`
+    reachable from `requested` and `accepted`. Terminal states are terminal:
+    anything else is `409 INVALID_STATE_TRANSITION`.
+servers:
+  - url: http://127.0.0.1:8000/api
+    description: Local development
+tags:
+  - name: Auth
+  - name: Rides
+  - name: Drivers
+  - name: Directory
+  - name: Health
+
+paths:
+  /auth/rider/login:
+    post:
+      tags: [Auth]
+      summary: End-user login as rider
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                riderId:
+                  type: string
+                  description: Rider UUID or phone number
+      responses:
+        '200':
+          description: Rider authenticated profile
+
+  /auth/driver/login:
+    post:
+      tags: [Auth]
+      summary: Driver login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                driverId:
+                  type: string
+                  description: Driver UUID or phone number
+      responses:
+        '200':
+          description: Driver authenticated profile
+
+  /driver/feed:
+    get:
+      tags: [Drivers]
+      summary: Real-time incoming rides and active trip feed for the driver
+      parameters:
+        - in: header
+          name: x-driver-id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Active trip and incoming requests
+
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      security: []
+      responses:
+        '200':
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      status: { type: string, example: ok }
+                      service: { type: string, example: ridebook-api }
+                      time: { type: string, format: date-time }
+
+  /locations:
+    get:
+      tags: [Directory]
+      summary: Lahore service area and pickup points
+      description: Static geocoder stand-in; the bounding box is also the server-side service-area check.
+      responses:
+        '200':
+          description: Service area
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      city: { type: string, example: Lahore }
+                      bounds:
+                        type: object
+                        properties:
+                          min_lat: { type: number, example: 31.20 }
+                          max_lat: { type: number, example: 31.75 }
+                          min_lng: { type: number, example: 74.05 }
+                          max_lng: { type: number, example: 74.60 }
+                      locations:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string, example: gulberg-iii }
+                            label: { type: string }
+                            area: { type: string }
+                            lat: { type: number }
+                            lng: { type: number }
+
+  /riders:
+    get:
+      tags: [Directory]
+      summary: Demo rider directory
+      description: Stands in for an authenticated profile endpoint so the SPA can offer an identity picker.
+      responses:
+        '200':
+          description: Riders
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Rider'
+
+  /drivers:
+    get:
+      tags: [Drivers]
+      summary: Demo driver directory
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/DriverStatus'
+      responses:
+        '200':
+          description: Drivers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Driver'
+
+  /drivers/{driver}/status:
+    patch:
+      tags: [Drivers]
+      summary: Set driver availability
+      description: |
+        The driver owns "available"/"offline". `on_trip` is written only by the
+        ride service, so a driver cannot mark themselves free mid-trip.
+      parameters:
+        - name: driver
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: X-Driver-Id
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [available, offline]
+                lat: { type: number, example: 31.5204 }
+                lng: { type: number, example: 74.3440 }
+      responses:
+        '200':
+          description: Updated driver
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Driver' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /rides/estimate:
+    post:
+      tags: [Rides]
+      summary: Price a trip before requesting it
+      description: |
+        Pure read: creates nothing. Returns the same fare the ride will be
+        created with, plus how many drivers could take it and the nearest
+        pickup ETA.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category, pickup, destination]
+              properties:
+                category: { $ref: '#/components/schemas/RideCategory' }
+                pickup: { $ref: '#/components/schemas/Coordinates' }
+                destination: { $ref: '#/components/schemas/Coordinates' }
+      responses:
+        '200':
+          description: Quote
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Estimate' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /rides:
+    post:
+      tags: [Rides]
+      summary: Create a ride request
+      description: |
+        Creates a `requested` ride with a snapshot of the fare. Rejected with
+        `409 ACTIVE_RIDE_EXISTS` if the rider already has a live ride — the
+        database enforces this with a partial unique index as well.
+
+        Send `Idempotency-Key` to make retries safe. The response header
+        `Idempotent-Replayed: true` marks a replayed response.
+      parameters:
+        - name: X-Rider-Id
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string, minLength: 8, maxLength: 200 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRideRequest'
+            example:
+              category: economy
+              pickup:
+                label: Gulberg III, Main Boulevard
+                lat: 31.5204
+                lng: 74.3440
+              destination:
+                label: DHA Phase 5, Khayaban-e-Bukhari
+                lat: 31.4697
+                lng: 74.4123
+      responses:
+        '201':
+          description: Ride created (or the original response replayed)
+          headers:
+            Idempotent-Replayed:
+              schema: { type: string, enum: ['true', 'false'] }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Ride' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /rides/{ride}:
+    get:
+      tags: [Rides]
+      summary: Retrieve a ride and its timeline
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+      responses:
+        '200':
+          description: Ride
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Ride' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /rides/{ride}/accept:
+    post:
+      tags: [Rides]
+      summary: Accept a ride and assign yourself as the driver
+      description: |
+        Only one driver can win. The ride row is locked for the duration of the
+        transaction, so a concurrent accept waits, then sees `accepted` and gets
+        `409 RIDE_ALREADY_ACCEPTED` instead of overwriting the winner. A driver
+        already on a trip gets `409 DRIVER_BUSY`; an ineligible vehicle gets
+        `409 DRIVER_NOT_ELIGIBLE`.
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+        - name: X-Driver-Id
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Ride with the assigned driver
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Ride' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /rides/{ride}/cancel:
+    post:
+      tags: [Rides]
+      summary: Cancel a ride
+      description: |
+        The rider who owns the ride or the assigned driver may cancel, while the
+        ride is `requested` or `accepted`. Cancelling an accepted ride releases
+        the driver back to `available` in the same transaction.
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+        - name: X-Rider-Id
+          in: header
+          required: false
+          schema: { type: string, format: uuid }
+        - name: X-Driver-Id
+          in: header
+          required: false
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 200 }
+      responses:
+        '200':
+          description: Cancelled ride
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Ride' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /rides/{ride}/complete:
+    post:
+      tags: [Rides]
+      summary: Complete a ride
+      description: Only the assigned driver may complete an `accepted` ride.
+      parameters:
+        - $ref: '#/components/parameters/RideId'
+        - name: X-Driver-Id
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Completed ride
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Ride' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+components:
+  parameters:
+    RideId:
+      name: ride
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    Unauthorized:
+      description: Missing or malformed caller identity
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Forbidden:
+      description: The caller does not own this resource
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    NotFound:
+      description: Resource does not exist
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Conflict:
+      description: The request conflicts with the current ride or driver state
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ValidationError:
+      description: Input failed validation, or the trip is outside the service area
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  schemas:
+    RideCategory:
+      type: string
+      enum: [economy, comfort]
+
+    RideStatus:
+      type: string
+      enum: [requested, accepted, cancelled, completed]
+
+    DriverStatus:
+      type: string
+      enum: [available, on_trip, offline]
+
+    Coordinates:
+      type: object
+      required: [lat, lng]
+      properties:
+        label: { type: string, maxLength: 160 }
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lng: { type: number, minimum: -180, maximum: 180 }
+
+    CreateRideRequest:
+      type: object
+      required: [category, pickup, destination]
+      properties:
+        category: { $ref: '#/components/schemas/RideCategory' }
+        pickup:
+          allOf:
+            - $ref: '#/components/schemas/Coordinates'
+            - type: object
+              required: [label]
+        destination:
+          allOf:
+            - $ref: '#/components/schemas/Coordinates'
+            - type: object
+              required: [label]
+
+    Rider:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        fullName: { type: string }
+        phone: { type: string, example: '+923001234501' }
+
+    DriverSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        fullName: { type: string }
+        vehicleCategory: { $ref: '#/components/schemas/RideCategory' }
+        vehicleModel: { type: string }
+        vehiclePlate: { type: string }
+        rating: { type: number, example: 4.8 }
+        status: { $ref: '#/components/schemas/DriverStatus' }
+        city: { type: string }
+        phone: { type: string }
+
+    Driver:
+      allOf:
+        - $ref: '#/components/schemas/DriverSummary'
+        - type: object
+          properties:
+            isActive: { type: boolean }
+            location:
+              type: object
+              nullable: true
+              properties:
+                lat: { type: number }
+                lng: { type: number }
+
+    Fare:
+      type: object
+      properties:
+        currency: { type: string, example: PKR }
+        totalMinor: { type: integer, description: Total in paisa }
+        totalPkr: { type: number, description: Display convenience only }
+        breakdown:
+          type: object
+          properties:
+            baseMinor: { type: integer }
+            distanceMinor: { type: integer }
+            timeMinor: { type: integer }
+            minimumMinor: { type: integer }
+            surgeMultiplier: { type: number }
+
+    TimelineEntry:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [ride_requested, ride_accepted, ride_cancelled, ride_completed]
+        actorType:
+          type: string
+          enum: [rider, driver, system]
+        at: { type: string, format: date-time, nullable: true }
+        metadata: { type: object, additionalProperties: true }
+
+    Ride:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/RideStatus' }
+        category: { $ref: '#/components/schemas/RideCategory' }
+        city: { type: string }
+        riderId: { type: string, format: uuid }
+        driver:
+          oneOf:
+            - $ref: '#/components/schemas/DriverSummary'
+            - type: 'null'
+        pickup: { $ref: '#/components/schemas/Coordinates' }
+        destination: { $ref: '#/components/schemas/Coordinates' }
+        trip:
+          type: object
+          properties:
+            distanceMeters: { type: integer }
+            durationSeconds: { type: integer }
+            pickupEtaMinutes: { type: integer, nullable: true }
+        fare: { $ref: '#/components/schemas/Fare' }
+        cancellable: { type: boolean }
+        timeline:
+          type: array
+          items: { $ref: '#/components/schemas/TimelineEntry' }
+        requestedAt: { type: string, format: date-time, nullable: true }
+        acceptedAt: { type: string, format: date-time, nullable: true }
+        completedAt: { type: string, format: date-time, nullable: true }
+        cancelledAt: { type: string, format: date-time, nullable: true }
+        cancelledBy: { type: string, nullable: true, enum: [rider, driver, system, null] }
+        cancellationReason: { type: string, nullable: true }
+
+    Estimate:
+      type: object
+      properties:
+        category: { $ref: '#/components/schemas/RideCategory' }
+        currency: { type: string }
+        fare:
+          type: object
+          properties:
+            totalMinor: { type: integer }
+            totalPkr: { type: number }
+            breakdown: { type: object }
+        distanceMeters: { type: integer }
+        durationSeconds: { type: integer }
+        pickupEtaMinutes: { type: integer, nullable: true }
+        availableDrivers: { type: integer }
+        vehicleExample: { type: string }
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - VALIDATION_ERROR
+                - MISSING_ACTOR
+                - FORBIDDEN
+                - NOT_FOUND
+                - RIDE_NOT_FOUND
+                - RIDER_NOT_FOUND
+                - DRIVER_NOT_FOUND
+                - ACTIVE_RIDE_EXISTS
+                - RIDE_ALREADY_ACCEPTED
+                - INVALID_STATE_TRANSITION
+                - DRIVER_NOT_ELIGIBLE
+                - DRIVER_BUSY
+                - IDEMPOTENCY_KEY_REUSED
+                - IDEMPOTENCY_IN_PROGRESS
+                - OUTSIDE_SERVICE_AREA
+                - TRIP_TOO_SHORT
+                - TRIP_TOO_LONG
+                - RATE_LIMITED
+                - INTERNAL_ERROR
+                - SERVICE_UNAVAILABLE
+            message: { type: string }
+            details:
+              type: object
+              additionalProperties: true
+              description: Field errors or state context (e.g. existing rideId, from-state of an invalid transition).
+            requestId: { type: string }
