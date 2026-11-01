@@ -1,0 +1,15 @@
+**/node_modules
+**/vendor
+**/dist
+.pgdata
+.git
+.gitignore
+**/*.log
+**/.env
+**/.env.*
+!**/.env.example
+apps/api/storage/logs
+apps/api/storage/framework/cache
+apps/api/storage/framework/sessions
+apps/api/storage/framework/views
+docs

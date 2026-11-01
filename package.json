@@ -1,0 +1,27 @@
+{
+  "name": "ridebook-lahore",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Simplified ride-booking platform for Lahore: a Laravel 12 REST API backed by MySQL / PostgreSQL and a React rider & driver app.",
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "db:migrate": "cd apps/api && php artisan migrate:fresh --seed",
+    "db:up": "node scripts/pg.mjs up",
+    "db:ensure": "node scripts/pg.mjs ensure",
+    "db:down": "node scripts/pg.mjs down",
+    "dev:api": "cd apps/api && php artisan serve --host=127.0.0.1 --port=8000",
+    "dev:reverb": "cd apps/api && php artisan reverb:start --debug",
+    "dev:web": "npm --workspace @ridebook/web run dev",
+    "build:web": "npm --workspace @ridebook/web run build",
+    "test": "npm run test:api && npm run test:web",
+    "test:api": "apps\\api\\vendor\\bin\\phpunit.bat --configuration apps/api/phpunit.xml",
+    "test:web": "npm --workspace @ridebook/web run test",
+    "typecheck:web": "npm --workspace @ridebook/web run typecheck"
+  },
+  "devDependencies": {
+    "embedded-postgres": "^17.5.0-beta.15",
+    "pg": "^8.13.1"
+  }
+}
